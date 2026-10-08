@@ -65,7 +65,9 @@ WINDOW_SCRIPT = os.path.join(BASE_DIR, "results_window.py")
 WORK_DIR = os.path.join(BASE_DIR, "work")
 GEOMETRY_PATH = os.path.join(WORK_DIR, "face_geometry.json")
 RESULTS_PATH = os.path.join(WORK_DIR, "face_results.json")
-PLOT_PATH = os.path.join(WORK_DIR, "face_plot.png")
+PLOT_PATHS = {"nl": os.path.join(WORK_DIR, "face_plot_nl.png"),
+              "en": os.path.join(WORK_DIR, "face_plot_en.png")}
+LANG_PATH = os.path.join(WORK_DIR, "window_lang.txt")   # last NL/EN choice
 LOG_PATH = os.path.join(WORK_DIR, "face_log.txt")
 
 VIEW_FROM_BEHIND = False    # True: mirror the 2D axes (view the face from the back)
@@ -253,7 +255,7 @@ def axis_name(vec):
     for i, name in enumerate("XYZ"):
         if abs(vec[i]) > 0.9999:
             return name if vec[i] > 0 else u"\u2212" + name
-    return u"schuin (%.2f; %.2f; %.2f)" % vec
+    return u"(%.2f; %.2f; %.2f)" % vec
 
 
 def plane_axes(n_out):
@@ -396,14 +398,14 @@ try:
         os.makedirs(WORK_DIR)
     with open(GEOMETRY_PATH, "w") as f:
         json.dump({"units": U, "mesh_size": MESH_SIZE, "regions": regions,
-                   "axis_names": [u_name, v_name], "plot_path": PLOT_PATH}, f)
+                   "axis_names": [u_name, v_name], "plot_paths": PLOT_PATHS}, f)
 
     # ----------------------- run the external analysis -----------------------
     if not os.path.isfile(PYTHON_EXE):
         fail("Python environment not found:\n%s\nCreate it with the two commands in README (Setup)." % PYTHON_EXE)
     if not os.path.isfile(ANALYSIS_SCRIPT):
         fail("Configured ANALYSIS_SCRIPT not found:\n%s\nSee README." % ANALYSIS_SCRIPT)
-    for old in (RESULTS_PATH, PLOT_PATH):
+    for old in [RESULTS_PATH] + list(PLOT_PATHS.values()):
         if os.path.isfile(old):
             os.remove(old)
 
@@ -423,87 +425,104 @@ try:
         fail("sectionproperties analysis failed:\n%s" % results.get("error", "unknown error"))
 
     # ------------------------------ show results ------------------------------
+    # Texts as {"nl": ..., "en": ...}; the results window switches language live.
+    def T(nl, en):
+        return {"nl": nl, "en": en}
+
     r = results
     u1, u2, u3, u4, u6 = U, U + u"²", U + u"³", U + u"⁴", U + u"⁶"
     cx, cy = r["centroid"]
     c3 = tuple(cx * u_axis[i] + cy * v_axis[i] + plane_offset * normal[i] for i in range(3))
     sections = [
-        (u"Geometrie", [
-            (u"Oppervlakte A", r["area"], u2),
-            (u"Omtrek (buitenrand)", r["perimeter"], u1),
-            (u"Zwaartepunt (x; y)", (cx, cy), u1),
-            (u"Zwaartepunt globaal (X; Y; Z)", c3, u1),
+        (T(u"Geometrie", u"Geometry"), [
+            (T(u"Oppervlakte A", u"Area A"), r["area"], u2),
+            (T(u"Omtrek (buitenrand)", u"Perimeter (outer)"), r["perimeter"], u1),
+            (T(u"Zwaartepunt (x; y)", u"Centroid (x; y)"), (cx, cy), u1),
+            (T(u"Zwaartepunt globaal (X; Y; Z)", u"Centroid global (X; Y; Z)"), c3, u1),
         ]),
-        (u"Traagheid t.o.v. zwaartepunt", [
+        (T(u"Traagheid t.o.v. zwaartepunt", u"Second moments about centroid"), [
             (u"Ixx", r["ixx_c"], u4),
             (u"Iyy", r["iyy_c"], u4),
             (u"Ixy", r["ixy_c"], u4),
-            (u"I11 (hoofdas)", r["i11_c"], u4),
-            (u"I22 (hoofdas)", r["i22_c"], u4),
-            (u"Hoek hoofdas φ", r["principal_angle_deg"], u"°"),
-            (u"Traagheidsstraal rx", r["rc"][0], u1),
-            (u"Traagheidsstraal ry", r["rc"][1], u1),
+            (T(u"I11 (hoofdas)", u"I11 (principal)"), r["i11_c"], u4),
+            (T(u"I22 (hoofdas)", u"I22 (principal)"), r["i22_c"], u4),
+            (T(u"Hoek hoofdas φ", u"Principal angle φ"), r["principal_angle_deg"], u"°"),
+            (T(u"Traagheidsstraal rx", u"Radius of gyration rx"), r["rc"][0], u1),
+            (T(u"Traagheidsstraal ry", u"Radius of gyration ry"), r["rc"][1], u1),
         ]),
-        (u"Weerstandsmomenten", [
-            (u"Wx boven (+y)", r["zxx_plus"], u3),
-            (u"Wx onder (−y)", r["zxx_minus"], u3),
-            (u"Wy rechts (+x)", r["zyy_plus"], u3),
-            (u"Wy links (−x)", r["zyy_minus"], u3),
+        (T(u"Weerstandsmomenten", u"Section moduli"), [
+            (T(u"Wx boven (+y)", u"Wx top (+y)"), r["zxx_plus"], u3),
+            (T(u"Wx onder (−y)", u"Wx bottom (−y)"), r["zxx_minus"], u3),
+            (T(u"Wy rechts (+x)", u"Wy right (+x)"), r["zyy_plus"], u3),
+            (T(u"Wy links (−x)", u"Wy left (−x)"), r["zyy_minus"], u3),
         ]),
     ]
     if r.get("plastic_properties_computed"):
         sections[2][1].extend([
-            (u"Wpl,x (plastisch)", r["sxx"], u3),
-            (u"Wpl,y (plastisch)", r["syy"], u3),
+            (T(u"Wpl,x (plastisch)", u"Wpl,x (plastic)"), r["sxx"], u3),
+            (T(u"Wpl,y (plastisch)", u"Wpl,y (plastic)"), r["syy"], u3),
         ])
     notes = []
-    if r.get("warping_properties_computed"):
-        sections.append((u"Torsie en welving", [
-            (u"Torsieconstante J", r["j"], u4),
-            (u"Welvingsconstante Iw", r["gamma"], u6),
-            (u"Dwarskrachtcentrum (x; y)", tuple(r["shear_centre"]), u1),
-        ]))
-    else:
-        notes.append(u"Torsie/welving niet berekend: %s" % (r.get("warping_note") or u"onbekende fout"))
     n_parts = r.get("n_parts", 1)
+    if r.get("warping_properties_computed"):
+        sections.append((T(u"Torsie en welving", u"Torsion and warping"), [
+            (T(u"Torsieconstante J", u"Torsion constant J"), r["j"], u4),
+            (T(u"Welvingsconstante Iw", u"Warping constant Iw"), r["gamma"], u6),
+            (T(u"Dwarskrachtcentrum (x; y)", u"Shear centre (x; y)"), tuple(r["shear_centre"]), u1),
+        ]))
+    elif n_parts > 1:
+        notes.append(T(u"Torsie/welving niet berekend: doorsnede bestaat uit %d losse delen." % n_parts,
+                       u"Torsion/warping not computed: section consists of %d separate parts." % n_parts))
+    else:
+        reason = r.get("warping_note") or u"?"
+        notes.append(T(u"Torsie/welving niet berekend: %s" % reason,
+                       u"Torsion/warping not computed: %s" % reason))
     if len(faces) > 1:
-        notes.append(u"%d vlakken samengevoegd tot %d los(se) deel/delen." % (len(faces), n_parts))
-    notes.append(u"Assen: x = globaal %s, y = globaal %s (gezien van buiten op het vlak)"
-                 % (u_name, v_name))
-    notes.append(u"Volledige resultaten: %s" % RESULTS_PATH)
+        notes.append(T(u"%d vlakken samengevoegd tot %d los(se) deel/delen." % (len(faces), n_parts),
+                       u"%d faces merged into %d separate part(s)." % (len(faces), n_parts)))
+    notes.append(T(u"Assen: x = globaal %s, y = globaal %s (gezien van buiten op het vlak)" % (u_name, v_name),
+                   u"Axes: x = global %s, y = global %s (face seen from outside)" % (u_name, v_name)))
+    notes.append(T(u"Volledige resultaten: %s" % RESULTS_PATH, u"Full results: %s" % RESULTS_PATH))
 
     if len(face_names) <= 4:
-        faces_txt = u", ".join(face_names)
+        faces_txt = T(u", ".join(face_names), u", ".join(face_names))
     else:
-        faces_txt = u"%d vlakken" % len(face_names)
-    subtitle = u"%s  ·  eenheden: %s" % (faces_txt, U)
+        faces_txt = T(u"%d vlakken" % len(face_names), u"%d faces" % len(face_names))
+    subtitle = T(u"%s  ·  eenheden: %s" % (faces_txt["nl"], U),
+                 u"%s  ·  units: %s" % (faces_txt["en"], U))
+
+    def nl(t):
+        return t["nl"] if isinstance(t, dict) else t
 
     text_lines = []
     for title, rows in sections:
-        text_lines.append(title)
+        text_lines.append(nl(title))
         for label, value, unit in rows:
             if isinstance(value, tuple):
                 value = u"(" + u"; ".join("%.6g" % v for v in value) + u")"
             else:
                 value = "%.6g" % value
-            text_lines.append(u"  %s = %s %s" % (label, value, unit))
-    log(subtitle)
-    log(u"\n".join(text_lines + notes))
+            text_lines.append(u"  %s = %s %s" % (nl(label), value, unit))
+    note_lines = [nl(n) for n in notes]
+    log(nl(subtitle))
+    log(u"\n".join(text_lines + note_lines))
     write_log()
 
     try:
         ns = {}
         execfile(WINDOW_SCRIPT, ns)
-        plot = PLOT_PATH if os.path.isfile(PLOT_PATH) else None
-        if plot is None and r.get("plot_error"):
-            notes.append(u"Plot niet gemaakt: %s" % r["plot_error"])
-        ns["show_results"](u"Section Properties", subtitle, sections, notes, image_path=plot)
+        plots = dict((k, p) for k, p in PLOT_PATHS.items() if os.path.isfile(p)) or None
+        if plots is None and r.get("plot_error"):
+            notes.append(T(u"Plot niet gemaakt: %s" % r["plot_error"],
+                           u"Plot not created: %s" % r["plot_error"]))
+        ns["show_results"](None, subtitle, sections, notes, image_path=plots, lang_path=LANG_PATH)
     except SystemExit:
         raise
     except Exception as exc:
         log("Results window failed: %s" % exc)
         write_log()
-        win.InfoDialog(u"\n".join([subtitle, u""] + text_lines + [u""] + notes), "Section Properties")
+        win.InfoDialog(u"\n".join([nl(subtitle), u""] + text_lines + [u""] + note_lines),
+                       "Section Properties")
 
 except SystemExit:
     raise

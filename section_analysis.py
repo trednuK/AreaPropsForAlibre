@@ -140,18 +140,33 @@ def run_analysis(data):
         results["sxx"] = sec.get_s()[0]
         results["syy"] = sec.get_s()[1]
 
-    if data.get("plot_path"):
+    # one PNG per language: {"nl": path, "en": path}; older form: "plot_path"
+    plot_paths = data.get("plot_paths") or (
+        {"nl": data["plot_path"]} if data.get("plot_path") else {})
+    if plot_paths:
         try:
-            plot_section(shapes, results, data)
-            results["plot_path"] = data["plot_path"]
+            for lang, path in plot_paths.items():
+                plot_section(shapes, results, data, lang, path)
+            results["plot_paths"] = plot_paths
         except Exception as exc:
             results["plot_error"] = str(exc)
 
     return results
 
 
-def plot_section(shapes, r, data):
+PLOT_TEXT = {
+    "nl": {"centroid": u"zwaartepunt", "axes": u"x, y: assen door zwaartepunt (Ixx, Iyy)",
+           "principal": u"hoofdas", "phi": u"van +x naar as 1", "sc": u"dwarskrachtcentrum",
+           "global": u"globaal", "dec": u","},
+    "en": {"centroid": u"centroid", "axes": u"x, y: centroidal axes (Ixx, Iyy)",
+           "principal": u"principal axis", "phi": u"from +x to axis 1", "sc": u"shear centre",
+           "global": u"global", "dec": u"."},
+}
+
+
+def plot_section(shapes, r, data, lang, path):
     """PNG of the section with centroid, centroidal x/y axes and principal axes."""
+    T = PLOT_TEXT.get(lang, PLOT_TEXT["en"])
     import math
     import matplotlib
     matplotlib.use("Agg")
@@ -205,23 +220,23 @@ def plot_section(shapes, r, data):
         if v != 0 and not (1e-3 <= abs(v) < 1e6) and fmt == "%.4g":
             e = int(math.floor(math.log10(abs(v))))
             sup = str(e).translate(str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹"))
-            return ("%.4g" % (v / 10.0 ** e)).replace(".", ",") + " × 10" + sup
+            return ("%.4g" % (v / 10.0 ** e)).replace(".", T["dec"]) + " × 10" + sup
         if fmt == "%.4g" and abs(v) >= 1e4:
             return "{:,.0f}".format(v).replace(",", " ")
-        return (fmt % v).replace(".", ",")
+        return (fmt % v).replace(".", T["dec"])
 
     from matplotlib.lines import Line2D
     handles = [
         Line2D([], [], marker="o", ls="", ms=8, mfc="white", mec="black", mew=1.5,
-               label=u"zwaartepunt (%s; %s)" % (nl(cx), nl(cy))),
+               label=u"%s (%s; %s)" % (T["centroid"], nl(cx), nl(cy))),
         Line2D([], [], color="#555555", ls="--", lw=1.0,
-               label=u"x, y: assen door zwaartepunt (Ixx, Iyy)"),
+               label=T["axes"]),
         Line2D([], [], color="#d1342f", lw=1.6,
-               label=u"1: hoofdas, I11 = %s %s⁴" % (nl(r["i11_c"]), u)),
+               label=u"1: %s, I11 = %s %s⁴" % (T["principal"], nl(r["i11_c"]), u)),
         Line2D([], [], color="#2e8b57", lw=1.6,
-               label=u"2: hoofdas, I22 = %s %s⁴" % (nl(r["i22_c"]), u)),
+               label=u"2: %s, I22 = %s %s⁴" % (T["principal"], nl(r["i22_c"]), u)),
         Line2D([], [], color="#d1342f", lw=1.0,
-               label=u"φ = %s° (van +x naar as 1)" % nl(phi, "%.1f")),
+               label=u"φ = %s° (%s)" % (nl(phi, "%.1f"), T["phi"])),
     ]
     ax.plot(cx, cy, marker="o", ms=9, mfc="white", mec="black", mew=1.5, zorder=5)
     ax.plot(cx, cy, marker="+", ms=9, color="black", mew=1.5, zorder=6)
@@ -230,21 +245,21 @@ def plot_section(shapes, r, data):
         if math.hypot(sx - cx, sy - cy) > 1e-3 * size:
             ax.plot(sx, sy, marker="D", ms=6, mfc="#f2a33a", mec="black", zorder=5)
             handles.append(Line2D([], [], marker="D", ls="", ms=6, mfc="#f2a33a", mec="black",
-                                  label=u"dwarskrachtcentrum (%s; %s)" % (nl(sx), nl(sy))))
+                                  label=u"%s (%s; %s)" % (T["sc"], nl(sx), nl(sy))))
 
     pad = 0.75 * size
     ax.set_xlim(cx - pad, cx + pad)
     ax.set_ylim(cy - pad, cy + pad)
     ax.set_aspect("equal")
     ax.grid(True, color="#e6e6e6", lw=0.6, zorder=0)
-    ax.set_xlabel(u"x = globaal %s  [%s]" % (ax_names[0], u))
-    ax.set_ylabel(u"y = globaal %s  [%s]" % (ax_names[1], u))
+    ax.set_xlabel(u"x = %s %s  [%s]" % (T["global"], ax_names[0], u))
+    ax.set_ylabel(u"y = %s %s  [%s]" % (T["global"], ax_names[1], u))
     for sp in ax.spines.values():
         sp.set_color("#bbbbbb")
     fig.legend(handles=handles, loc="lower center", ncol=1, fontsize=8, frameon=False,
                bbox_to_anchor=(0.5, 0.0))
     fig.tight_layout(rect=(0, 0.032 * len(handles), 1, 1))
-    fig.savefig(data["plot_path"], dpi=200)  # sharp when copied; window scales it down
+    fig.savefig(path, dpi=200)  # sharp when copied; window scales it down
     plt.close(fig)
 
 

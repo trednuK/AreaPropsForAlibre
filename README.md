@@ -7,9 +7,12 @@ every value shown with its unit (mm, mm², mm³, mm⁴, mm⁶) in a results
 window that stays on top of Alibre and has a Copy button (tab-separated,
 pastes into Excel).
 Next to the table the window shows a plot of the section (made with
-matplotlib, saved as `work\face_plot.png`): centroid,
+matplotlib, saved as `work\face_plot_nl.png` / `face_plot_en.png`): centroid,
 centroidal x/y axes in global coordinates, principal axes 1 and 2 with the
 angle phi from +x, and the shear centre.
+NL/EN radio buttons in the window header switch all window text, including
+the plot, between Dutch and English instantly; the choice is remembered in
+`work/window_lang.txt`. Copy always uses the Windows decimal separator.
 
 Tested on Alibre Design Expert 29.1 (AlibreScript, IronPython 2.7.10) on
 2026-10-07: a rail-like profile with lines and arcs gave A = 7439.13 mm²

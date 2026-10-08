@@ -5,30 +5,37 @@ results_window.py  (IronPython 2.7 / WinForms)
 Results window for alibre_section_properties.py. Loaded with execfile() so
 edits take effect without restarting Alibre. Entry point:
 
-    show_results(title, subtitle, sections, notes, snapshot_path=None)
+    show_results(title, subtitle, sections, notes, snapshot_path=None,
+                 image_path=None, lang_path=None, lang=None)
 
-sections: [(section_title, [(label, value_or_None, unit), ...]), ...]
-notes:    list of short strings shown under the table
+Every text may be a plain string or a {"nl": ..., "en": ...} dict; the NL/EN
+radio buttons in the header rebuild the window in the other language.
+
+sections:   [(section_title, [(label, value_or_None, unit), ...]), ...]
+notes:      list of short texts shown under the table
+image_path: plot PNG, or {"nl": path, "en": path}
+lang_path:  file that remembers the last chosen language
 snapshot_path: if given, render the window to a PNG instead of showing it
 """
 import math
+import os
 
 import clr
 clr.AddReference("System.Windows.Forms")
 clr.AddReference("System.Drawing")
 
-from System.Drawing import Bitmap, Color, ContentAlignment, Font, FontStyle, Point, Rectangle, Size, SizeF
+from System.Drawing import (Bitmap, Color, ContentAlignment, Font, FontStyle, Image, Point,
+                            Rectangle, Size, SizeF)
 from System.Drawing.Imaging import ImageFormat
-from System.Drawing import Image
 from System.Globalization import CultureInfo
 from System.IO import File, MemoryStream
 from System.Threading import ApartmentState, Thread, ThreadStart
-from System.Windows.Forms import (AnchorStyles, AutoScaleMode, Button, Clipboard, Cursors,
-                                  FlatStyle, Form, FormBorderStyle, PictureBox,
-                                  PictureBoxSizeMode, Screen, CheckBox,
-                                  FormStartPosition, Label, Panel)
+from System.Windows.Forms import (AnchorStyles, AutoScaleMode, Button, CheckBox, Clipboard,
+                                  Cursors, FlatStyle, Form, FormBorderStyle, FormStartPosition,
+                                  Label, MethodInvoker, Panel, PictureBox, PictureBoxSizeMode,
+                                  RadioButton, Screen)
 
-DEC = CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator
+CULTURE_DEC = CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator  # for Copy/Excel
 
 C_HEADER = Color.FromArgb(32, 41, 54)
 C_HEADER_SUB = Color.FromArgb(170, 182, 196)
@@ -43,14 +50,32 @@ SUP = {"-": u"⁻", "0": u"⁰", "1": u"¹", "2": u"²", "3": u"³",
        "4": u"⁴", "5": u"⁵", "6": u"⁶", "7": u"⁷", "8": u"⁸",
        "9": u"⁹"}
 
+UI = {
+    "nl": {"title": u"Doorsnede-eigenschappen", "copy": u"Kopiëren", "close": u"Sluiten",
+           "copy_img": u"Afbeelding kopiëren", "copied": u"Gegevens gekopieerd (plakbaar in Excel)",
+           "copied_img": u"Afbeelding gekopieerd", "copy_fail": u"Kopiëren mislukt: %s",
+           "dec": u","},
+    "en": {"title": u"Section properties", "copy": u"Copy", "close": u"Close",
+           "copy_img": u"Copy image", "copied": u"Data copied (pastes into Excel)",
+           "copied_img": u"Image copied", "copy_fail": u"Copy failed: %s",
+           "dec": u"."},
+}
+LANGS = ("nl", "en")
+
 WIDTH = 560             # table column
-IMG_W = 520             # plot column (PNG is 520 x 660 px)
+IMG_W = 520             # plot column (PNG aspect 520 x 660)
 PAD = 22
 COL_VALUE_RIGHT = 440   # right edge of the value column
 ROW_H = 22
 
 
-def fmt(v):
+def tr(text, lang):
+    if isinstance(text, dict):
+        return text.get(lang) or text.get("en") or text.values()[0]
+    return text
+
+
+def fmt(v, dec):
     """Readable number: grouped digits, x10^n for very large/small values."""
     if v is None:
         return u"–"
@@ -74,15 +99,15 @@ def fmt(v):
                 ip = ip[:-3]
             groups.insert(0, ip)
             ip = u" ".join(groups)
-        return sign + ip + (DEC + fp if fp else u"")
+        return sign + ip + (dec + fp if fp else u"")
     e = int(math.floor(math.log10(a)))
     m = v / 10.0 ** e
-    ms = ("%.4f" % m).rstrip("0").rstrip(".").replace(".", DEC)
+    ms = ("%.4f" % m).rstrip("0").rstrip(".").replace(".", dec)
     return u"%s × 10%s" % (ms, u"".join(SUP[c] for c in str(e)))
 
 
 def raw(v):
-    return u"" if v is None else ("%.10g" % v).replace(".", DEC)
+    return u"" if v is None else ("%.10g" % v).replace(".", CULTURE_DEC)
 
 
 def _label(parent, text, x, y, w, h, size=9.75, style=FontStyle.Regular, color=C_TEXT,
@@ -121,11 +146,44 @@ def _button(parent, text, x, y, primary):
     return b
 
 
-def build_form(title, subtitle, sections, notes, image_path=None):
+def _load_image(path):
+    try:
+        # via a stream so the PNG file is not locked for the next run
+        return Image.FromStream(MemoryStream(File.ReadAllBytes(path)))
+    except Exception:
+        return None
+
+
+def _read_lang(lang_path):
+    try:
+        with open(lang_path) as f:
+            v = f.read().strip()
+        return v if v in LANGS else None
+    except Exception:
+        return None
+
+
+def _write_lang(lang_path, lang):
+    try:
+        with open(lang_path, "w") as f:
+            f.write(lang)
+    except Exception:
+        pass
+
+
+def build_form(title, subtitle, sections, notes, image_path=None, lang_path=None, lang=None):
+    if isinstance(image_path, dict):
+        images = dict((k, _load_image(p)) for k, p in image_path.items() if p)
+    elif image_path:
+        img = _load_image(image_path)
+        images = dict((k, img) for k in LANGS)
+    else:
+        images = {}
+    lang = lang or (lang_path and _read_lang(lang_path)) or "nl"
+
     form = Form()
     form.AutoScaleDimensions = SizeF(96.0, 96.0)
     form.AutoScaleMode = AutoScaleMode.Dpi
-    form.Text = title
     form.BackColor = C_BG
     form.FormBorderStyle = FormBorderStyle.FixedSingle
     form.MaximizeBox = False
@@ -135,156 +193,200 @@ def build_form(title, subtitle, sections, notes, image_path=None):
     form.TopMost = True
     form.Font = Font("Segoe UI", 9.75)
 
-    image = None
-    if image_path:
-        try:
-            # load via a stream so the PNG file is not locked for the next run
-            image = Image.FromStream(MemoryStream(File.ReadAllBytes(image_path)))
-        except Exception:
-            image = None
-    TW = WIDTH + (IMG_W + PAD if image is not None else 0)
+    def render(lang):
+        U = UI[lang]
+        dec = U["dec"]
+        image = images.get(lang) or images.get("nl") or images.get("en")
+        form.SuspendLayout()
+        for c in list(form.Controls):
+            c.Dispose()
+        form.Controls.Clear()
+        form.AutoScroll = False
+        form.Text = tr(title, lang) if title else U["title"]
+        TW = WIDTH + (IMG_W + PAD if image is not None else 0)
 
-    # Header
-    header = Panel()
-    header.BackColor = C_HEADER
-    header.Location = Point(0, 0)
-    header.Size = Size(TW, 70)
-    form.Controls.Add(header)
-    _label(header, title, PAD, 10, TW - 2 * PAD, 30, 15, FontStyle.Bold, Color.White)
-    _label(header, subtitle, PAD, 40, TW - 2 * PAD, 20, 9, FontStyle.Regular, C_HEADER_SUB)
+        # Header with NL / EN switch
+        header = Panel()
+        header.BackColor = C_HEADER
+        header.Location = Point(0, 0)
+        header.Size = Size(TW, 70)
+        form.Controls.Add(header)
+        _label(header, form.Text, PAD, 10, TW - 2 * PAD - 120, 30, 15, FontStyle.Bold, Color.White)
+        _label(header, tr(subtitle, lang), PAD, 40, TW - 2 * PAD - 120, 20, 9,
+               FontStyle.Regular, C_HEADER_SUB)
+        for i, code in enumerate(LANGS):
+            rb = RadioButton()
+            rb.Text = code.upper()
+            rb.Font = Font("Segoe UI", 9.5, FontStyle.Bold)
+            rb.ForeColor = Color.White
+            rb.BackColor = C_HEADER
+            rb.AutoSize = True
+            rb.Location = Point(TW - PAD - 110 + i * 56, 24)
+            rb.Checked = (code == lang)
+            rb.Cursor = Cursors.Hand
+            rb.Tag = code
+            rb.CheckedChanged += on_lang
+            header.Controls.Add(rb)
 
-    # Body
-    y = 70 + 10
-    copy_lines = [title, subtitle, u""]
-    for sec_title, rows in sections:
-        y += 8
-        _label(form, sec_title.upper(), PAD, y, WIDTH - 2 * PAD, 22, 8.5, FontStyle.Bold, C_ACCENT)
-        y += 24
-        line = Panel()
-        line.BackColor = C_LINE
-        line.Location = Point(PAD, y - 2)
-        line.Size = Size(WIDTH - 2 * PAD, 1)
-        form.Controls.Add(line)
-        copy_lines.append(sec_title)
-        for i, (label, value, unit) in enumerate(rows):
-            band = C_BAND if i % 2 == 1 else C_BG
-            row = Panel()
-            row.BackColor = band
-            row.Location = Point(PAD, y)
-            row.Size = Size(WIDTH - 2 * PAD, ROW_H)
-            form.Controls.Add(row)
-            _label(row, label, 8, 0, 200, ROW_H, 9.75, FontStyle.Regular, C_MUTED, back=band)
-            if isinstance(value, tuple):
-                text = u"(" + u";  ".join(fmt(v) for v in value) + u")"
-                copy_val = u"\t".join(raw(v) for v in value)
-            elif isinstance(value, basestring):
-                text, copy_val = value, value
-            else:
-                text, copy_val = fmt(value), raw(value)
-            _label(row, text, 205, 0, COL_VALUE_RIGHT - PAD - 205, ROW_H, 10, FontStyle.Bold,
-                   C_TEXT, ContentAlignment.MiddleRight, back=band)
-            _label(row, unit, COL_VALUE_RIGHT - PAD + 8, 0, WIDTH - COL_VALUE_RIGHT - PAD, ROW_H,
-                   9.75, FontStyle.Regular, C_MUTED, back=band)
-            copy_lines.append(u"%s\t%s\t%s" % (label, copy_val, unit))
-            y += ROW_H
-        copy_lines.append(u"")
-        y += 4
-
-    # Notes
-    if notes:
-        y += 6
-        for n in notes:
-            _label(form, n, PAD, y, WIDTH - 2 * PAD, 18, 8.5, FontStyle.Regular, C_MUTED)
-            y += 18
-            copy_lines.append(n)
-
-    if image is not None:
-        pic = PictureBox()
-        pic.Image = image
-        pic.SizeMode = PictureBoxSizeMode.Zoom
-        pic.Location = Point(WIDTH, 80)
-        pic.Size = Size(IMG_W, int(IMG_W * image.Height / float(image.Width)))
-        form.Controls.Add(pic)
-        y = max(y, pic.Bottom)
-
-    # Footer
-    y += 14
-    footer = Panel()
-    footer.BackColor = C_BAND
-    footer.Location = Point(0, y)
-    footer.Size = Size(TW, 56)
-    form.Controls.Add(footer)
-    sep = Panel()
-    sep.BackColor = C_LINE
-    sep.Location = Point(0, 0)
-    sep.Size = Size(TW, 1)
-    footer.Controls.Add(sep)
-    btn_close = _button(footer, u"Sluiten", TW - PAD - 110, 12, True)
-    btn_copy = _button(footer, u"Kopiëren", TW - PAD - 230, 12, False)
-    status = _label(footer, u"", PAD, 12, 250, 32, 9, FontStyle.Regular, C_MUTED, back=C_BAND)
-    chk_img = None
-    if image is not None:
-        chk_img = CheckBox()
-        chk_img.Text = u"Afbeelding kopi\u00ebren"
-        chk_img.Font = Font("Segoe UI", 9.5)
-        chk_img.ForeColor = C_TEXT
-        chk_img.BackColor = C_BAND
-        chk_img.AutoSize = True
-        chk_img.Location = Point(TW - PAD - 230 - 175, 18)
-        footer.Controls.Add(chk_img)
-
-    copy_text = u"\r\n".join(copy_lines)
-
-    def on_copy(sender, e):
-        # AlibreScript runs scripts on an MTA thread; the clipboard needs STA.
-        errors = []
-
-        as_image = chk_img is not None and chk_img.Checked
-
-        def worker():
-            try:
-                if as_image:
-                    Clipboard.SetImage(image)
+        # Table
+        y = 70 + 10
+        copy_lines = [form.Text, tr(subtitle, lang), u""]
+        for sec_title, rows in sections:
+            st = tr(sec_title, lang)
+            y += 8
+            _label(form, st.upper(), PAD, y, WIDTH - 2 * PAD, 22, 8.5, FontStyle.Bold, C_ACCENT)
+            y += 24
+            line = Panel()
+            line.BackColor = C_LINE
+            line.Location = Point(PAD, y - 2)
+            line.Size = Size(WIDTH - 2 * PAD, 1)
+            form.Controls.Add(line)
+            copy_lines.append(st)
+            for i, (label, value, unit) in enumerate(rows):
+                label = tr(label, lang)
+                band = C_BAND if i % 2 == 1 else C_BG
+                row = Panel()
+                row.BackColor = band
+                row.Location = Point(PAD, y)
+                row.Size = Size(WIDTH - 2 * PAD, ROW_H)
+                form.Controls.Add(row)
+                _label(row, label, 8, 0, 200, ROW_H, 9.75, FontStyle.Regular, C_MUTED, back=band)
+                if isinstance(value, tuple):
+                    text = u"(" + u";  ".join(fmt(v, dec) for v in value) + u")"
+                    copy_val = u"\t".join(raw(v) for v in value)
+                elif isinstance(value, (basestring, dict)):
+                    text = copy_val = tr(value, lang)
                 else:
-                    Clipboard.SetText(copy_text)
-            except Exception as exc:
-                errors.append(exc)
+                    text, copy_val = fmt(value, dec), raw(value)
+                _label(row, text, 205, 0, COL_VALUE_RIGHT - PAD - 205, ROW_H, 10, FontStyle.Bold,
+                       C_TEXT, ContentAlignment.MiddleRight, back=band)
+                _label(row, unit, COL_VALUE_RIGHT - PAD + 8, 0, WIDTH - COL_VALUE_RIGHT - PAD, ROW_H,
+                       9.75, FontStyle.Regular, C_MUTED, back=band)
+                copy_lines.append(u"%s\t%s\t%s" % (label, copy_val, unit))
+                y += ROW_H
+            copy_lines.append(u"")
+            y += 4
 
-        t = Thread(ThreadStart(worker))
-        t.SetApartmentState(ApartmentState.STA)
-        t.Start()
-        t.Join()
-        if errors:
-            status.Text = u"Kopiëren mislukt: %s" % errors[0]
-        else:
-            status.Text = (u"Afbeelding gekopieerd" if as_image
-                           else u"Gegevens gekopieerd (plakbaar in Excel)")
+        # Notes
+        if notes:
+            y += 6
+            for n in notes:
+                n = tr(n, lang)
+                _label(form, n, PAD, y, WIDTH - 2 * PAD, 18, 8.5, FontStyle.Regular, C_MUTED)
+                y += 18
+                copy_lines.append(n)
 
-    def on_close(sender, e):
-        form.Close()
+        # Plot
+        if image is not None:
+            pic = PictureBox()
+            pic.Image = image
+            pic.SizeMode = PictureBoxSizeMode.Zoom
+            pic.Location = Point(WIDTH, 80)
+            pic.Size = Size(IMG_W, int(IMG_W * image.Height / float(image.Width)))
+            form.Controls.Add(pic)
+            y = max(y, pic.Bottom)
 
-    btn_copy.Click += on_copy
-    btn_close.Click += on_close
-    form.AcceptButton = btn_close
-    form.CancelButton = btn_close
+        # Footer
+        y += 14
+        footer = Panel()
+        footer.BackColor = C_BAND
+        footer.Location = Point(0, y)
+        footer.Size = Size(TW, 56)
+        form.Controls.Add(footer)
+        sep = Panel()
+        sep.BackColor = C_LINE
+        sep.Location = Point(0, 0)
+        sep.Size = Size(TW, 1)
+        footer.Controls.Add(sep)
+        btn_close = _button(footer, U["close"], TW - PAD - 110, 12, True)
+        btn_copy = _button(footer, U["copy"], TW - PAD - 230, 12, False)
+        status = _label(footer, u"", PAD, 12, 300, 32, 9, FontStyle.Regular, C_MUTED, back=C_BAND)
+        chk_img = None
+        if image is not None:
+            chk_img = CheckBox()
+            chk_img.Text = U["copy_img"]
+            chk_img.Font = Font("Segoe UI", 9.5)
+            chk_img.ForeColor = C_TEXT
+            chk_img.BackColor = C_BAND
+            chk_img.AutoSize = True
+            chk_img.Checked = state.get("copy_img", False)
+            chk_img.Location = Point(TW - PAD - 230 - 175, 18)
 
-    def on_shown(sender, e):
+            def on_chk(sender, e):
+                state["copy_img"] = sender.Checked
+
+            chk_img.CheckedChanged += on_chk
+            footer.Controls.Add(chk_img)
+
+        copy_text = u"\r\n".join(copy_lines)
+
+        def on_copy(sender, e):
+            # AlibreScript runs scripts on an MTA thread; the clipboard needs STA.
+            errors = []
+            as_image = chk_img is not None and chk_img.Checked
+
+            def worker():
+                try:
+                    if as_image:
+                        Clipboard.SetImage(image)
+                    else:
+                        Clipboard.SetText(copy_text)
+                except Exception as exc:
+                    errors.append(exc)
+
+            t = Thread(ThreadStart(worker))
+            t.SetApartmentState(ApartmentState.STA)
+            t.Start()
+            t.Join()
+            if errors:
+                status.Text = U["copy_fail"] % errors[0]
+            else:
+                status.Text = U["copied_img"] if as_image else U["copied"]
+
+        def on_close(sender, e):
+            form.Close()
+
+        btn_copy.Click += on_copy
+        btn_close.Click += on_close
+        form.AcceptButton = btn_close
+        form.CancelButton = btn_close
+        form.ClientSize = Size(TW, y + 56)
+        form.ResumeLayout()
+        fit_screen()
+
+    def fit_screen():
+        if not form.IsHandleCreated:
+            return
         wa = Screen.FromControl(form).WorkingArea
         if form.Height > wa.Height:
             form.AutoScroll = True
             form.Height = wa.Height
             form.Width += 18
             form.Top = wa.Top
+
+    def on_lang(sender, e):
+        if not sender.Checked or sender.Tag == state["lang"]:
+            return
+        state["lang"] = sender.Tag
+        if lang_path:
+            _write_lang(lang_path, sender.Tag)
+        # rebuild after this event returns (the radio button itself is disposed)
+        form.BeginInvoke(MethodInvoker(lambda: render(state["lang"])))
+
+    def on_shown(sender, e):
+        fit_screen()
         form.Activate()
         form.BringToFront()
 
+    state = {"lang": lang, "copy_img": False}
     form.Shown += on_shown
-    form.ClientSize = Size(TW, y + 56)
+    render(lang)
     return form
 
 
-def show_results(title, subtitle, sections, notes, snapshot_path=None, image_path=None):
-    form = build_form(title, subtitle, sections, notes, image_path)
+def show_results(title, subtitle, sections, notes, snapshot_path=None, image_path=None,
+                 lang_path=None, lang=None):
+    form = build_form(title, subtitle, sections, notes, image_path, lang_path, lang)
     if snapshot_path:
         form.Show()
         bmp = Bitmap(form.Width, form.Height)
