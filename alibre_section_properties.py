@@ -21,15 +21,48 @@ import os
 import clr
 clr.AddReference("System")
 from System.Diagnostics import Process, ProcessStartInfo
+from System import Environment
+from System.IO import Path
 
 # ---------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------
-PYTHON_EXE = r"C:\AlibreTools\sectionprops_env\Scripts\python.exe"
-SCRIPT_DIR = r"C:\Users\kunde\Documents\Alibre Script Library\AreaProps"
-ANALYSIS_SCRIPT = os.path.join(SCRIPT_DIR, "section_analysis.py")
-WINDOW_SCRIPT = os.path.join(SCRIPT_DIR, "results_window.py")
-WORK_DIR = r"C:\AlibreTools\work"
+# Folder holding this script, section_analysis.py and results_window.py.
+# None -> found automatically under Documents\Alibre Script Library (Alibre
+# Script runs scripts from a string, so the script can't see its own path).
+SCRIPT_DIR = None
+# Python with sectionproperties. None -> <SCRIPT_DIR>\.venv (see README).
+PYTHON_EXE = None
+
+
+def find_script_dir():
+    def ok(d):
+        return d and os.path.isfile(os.path.join(d, "section_analysis.py")) \
+            and os.path.isfile(os.path.join(d, "results_window.py"))
+    if ok(SCRIPT_DIR):
+        return SCRIPT_DIR
+    try:
+        d = os.path.dirname(os.path.abspath(__file__))
+        if ok(d):
+            return d
+    except NameError:
+        pass
+    docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+    root = os.path.join(docs, "Alibre Script Library")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [n for n in dirnames if n not in (".git", ".venv", "work", "__pycache__")]
+        if ok(dirpath) and "alibre_section_properties.py" in filenames:
+            return dirpath
+    return None
+
+
+SCRIPT_DIR = find_script_dir()
+BASE_DIR = SCRIPT_DIR or os.path.join(Path.GetTempPath(), "AreaPropsForAlibre")
+if not PYTHON_EXE:
+    PYTHON_EXE = os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe")
+ANALYSIS_SCRIPT = os.path.join(BASE_DIR, "section_analysis.py")
+WINDOW_SCRIPT = os.path.join(BASE_DIR, "results_window.py")
+WORK_DIR = os.path.join(BASE_DIR, "work")
 GEOMETRY_PATH = os.path.join(WORK_DIR, "face_geometry.json")
 RESULTS_PATH = os.path.join(WORK_DIR, "face_results.json")
 PLOT_PATH = os.path.join(WORK_DIR, "face_plot.png")
@@ -242,6 +275,11 @@ def plane_axes(n_out):
 # ---------------------------------------------------------------------
 # Alibre integration
 # ---------------------------------------------------------------------
+if SCRIPT_DIR is None:
+    fail("Could not find the AreaProps script folder (with section_analysis.py and "
+         "results_window.py) under Documents\\Alibre Script Library. Set SCRIPT_DIR "
+         "at the top of alibre_section_properties.py.")
+
 part = CurrentPart()
 if part is None:
     fail("No part is currently open. Open a part, select one or more faces, and try again.")
@@ -362,7 +400,7 @@ try:
 
     # ----------------------- run the external analysis -----------------------
     if not os.path.isfile(PYTHON_EXE):
-        fail("Configured PYTHON_EXE not found:\n%s\nSee README." % PYTHON_EXE)
+        fail("Python environment not found:\n%s\nCreate it with the two commands in README (Setup)." % PYTHON_EXE)
     if not os.path.isfile(ANALYSIS_SCRIPT):
         fail("Configured ANALYSIS_SCRIPT not found:\n%s\nSee README." % ANALYSIS_SCRIPT)
     for old in (RESULTS_PATH, PLOT_PATH):

@@ -7,7 +7,7 @@ every value shown with its unit (mm, mm², mm³, mm⁴, mm⁶) in a results
 window that stays on top of Alibre and has a Copy button (tab-separated,
 pastes into Excel).
 Next to the table the window shows a plot of the section (made with
-matplotlib, saved as `C:\AlibreTools\work\face_plot.png`): centroid,
+matplotlib, saved as `work\face_plot.png`): centroid,
 centroidal x/y axes in global coordinates, principal axes 1 and 2 with the
 angle phi from +x, and the shear centre.
 
@@ -37,29 +37,38 @@ that touch merge into one section; separate faces form a compound section.
 For a section made of separate parts, torsion/warping (J, Iw, shear centre)
 is not computed, because it isn't meaningful for unconnected parts.
 
-2D axes: for faces normal to a global axis, x/y are global axes (e.g. a face
-normal to X uses x = global Y, y = global Z) and the origin is the global
-origin, so the centroid is in model coordinates. Ixx/Iyy etc. are about the
-centroid.
+2D axes: the face is shown as seen from outside, like Alibre's standard views:
+y = global Y (up), or -Z for faces normal to Y, and x completes a right-handed
+system with the outward face normal (a face facing -X gets x = Z, y = Y). The
+origin is the global origin, so the centroid is in model coordinates.
+Ixx/Iyy etc. are about the centroid. If a face comes out mirrored compared to
+the screen, set `VIEW_FROM_BEHIND = True`.
 
-## Setup (already done on this PC)
+## Setup
 
-```
-python -m venv C:\AlibreTools\sectionprops_env
-C:\AlibreTools\sectionprops_env\Scripts\pip install sectionproperties shapely
-```
+1. Clone or copy this folder somewhere under
+   `Documents\Alibre Script Library\`, so it shows up in the Alibre Script
+   Library. The script finds its own folder there.
+2. Install Python 3.10+ (python.org) and, in this folder, create the
+   environment:
+   ```
+   python -m venv .venv
+   .venv\Scripts\pip install -r requirements.txt
+   ```
 
-Paths are in the CONFIGURATION block of `alibre_section_properties.py`
-(`PYTHON_EXE`, `ANALYSIS_SCRIPT`, `WORK_DIR = C:\AlibreTools\work`).
+All paths are relative to this folder: `.venv\` for Python, `work\` for the
+geometry, results, plot and log (both are git-ignored). If your Script
+Library lives elsewhere, set `SCRIPT_DIR` (and optionally `PYTHON_EXE`) at the
+top of `alibre_section_properties.py`.
 
 ## Usage
 
 1. Select one or more coplanar faces in the 3D view.
 2. In the Alibre Script panel, double-click `alibre_section_properties` under
-   Library → AreaProps, then click **Run**.
+   Library → AreaPropsForAlibre, then click **Run**.
 3. Wait for the analysis to finish (about 20–30 s, mostly the torsion/warping
    FEM). The results window appears on top. Full results:
-   `C:\AlibreTools\work\face_results.json`, log: `face_log.txt`.
+   `work\face_results.json`, log: `work\face_log.txt`.
 
 If you edited the script while its tab was open in the Alibre editor, close
 the tab and reopen it. Run executes the editor's copy, not the file on disk.
@@ -90,5 +99,3 @@ For another unit, compare the script's area with Alibre's status bar
   hasn't been seen in practice.
 - `MESH_SIZE = None` sets the maximum element area to area/3000. Use a
   smaller value for thin-walled sections.
-- `diagnostic_find_selection_api.py` is no longer needed (`part.Selections`
-  is confirmed).
