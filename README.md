@@ -14,6 +14,8 @@ NL/EN radio buttons in the window header switch all window text, including
 the plot, between Dutch and English instantly; the choice is remembered in
 `work/window_lang.txt`. Copy always uses the Windows decimal separator.
 
+[![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/trednuk/areapropsforalibre?utm_source=readme&utm_medium=badge)
+
 Tested on Alibre Design Expert 29.1 (AlibreScript, IronPython 2.7.10) on
 2026-10-07: a rail-like profile with lines and arcs gave A = 7439.13 mm²
 against 7438.75 mm² in Alibre's status bar (0.005 %).
