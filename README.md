@@ -66,8 +66,7 @@ geometry, results, plot and log (both are git-ignored). If your Script
 Library lives elsewhere, set `SCRIPT_DIR` (and optionally `PYTHON_EXE`) at the
 top of `alibre_section_properties.py`.
 
-<img width="371" height="335" alt="image" src="https://github.com/user-attachments/assets/8244e40c-78fa-4ac2-beda-2ad7aabc5664" />
-
+<img width="339" height="342" alt="image" src="https://github.com/user-attachments/assets/770ec48b-a7ca-4c1c-a3f8-2fe9fada67cd" />
 
 ## Usage
 
