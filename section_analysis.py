@@ -17,19 +17,28 @@ Input JSON schema (written by the Alibre-side script):
         ...
     ]
 }
+Optional "gaps_closed": [{"face", "length", "at": [x, y]}, ...] lists gaps
+between edge ends the Alibre side bridged; it is passed on as
+results["healing"]["gaps_closed"].
 The older single-face form {"outer": ..., "holes": ...} is also accepted.
 Regions are unioned: faces that touch merge into one section, separate
-faces form a compound section.
+faces form a compound section. Faces that nearly touch (gap/overlap up to
+SNAP_TOL_REL of the section size) are snapped together first; this is
+reported in results["healing"].
 """
 import sys
 import json
 import traceback
 
 from shapely.geometry import MultiPolygon, Polygon
-from shapely import set_precision, unary_union
+from shapely import set_precision, snap, unary_union
 from sectionproperties.pre import Geometry
 from sectionproperties.pre.geometry import CompoundGeometry
 from sectionproperties.analysis import Section
+
+# Neighbouring faces whose edges are closer than this fraction of the overall
+# section size are snapped together before the union (see snap_faces).
+SNAP_TOL_REL = 0.005
 
 
 def region_polygon(region):
@@ -56,21 +65,64 @@ def build_geometry(data):
     miny = min(p.bounds[1] for p in polys)
     maxx = max(p.bounds[2] for p in polys)
     maxy = max(p.bounds[3] for p in polys)
-    grid = max(maxx - minx, maxy - miny) * 1e-6
+    size = max(maxx - minx, maxy - miny)
+    grid = size * 1e-6
     polys = [set_precision(p, grid) for p in polys]
-    merged = unary_union(polys, grid_size=grid).buffer(0)
+    healing = {"gaps_closed": data.get("gaps_closed") or [], "snapped_faces": False,
+               "max_snap": 0.0}
+    merged = union_all(polys, grid)
+    if len(polys) > 1:
+        snapped, max_snap = snap_faces(polys, SNAP_TOL_REL * size)
+        if max_snap > 0.0:
+            merged_snapped = union_all(snapped, grid)
+            healing.update({"snapped_faces": True, "max_snap": max_snap,
+                            "snap_tol": SNAP_TOL_REL * size,
+                            "parts_before_snap": n_polygons(merged),
+                            "parts_after_snap": n_polygons(merged_snapped)})
+            merged = merged_snapped
     if merged.is_empty or not merged.is_valid:
         raise ValueError("Combined faces give an invalid or empty section.")
     if isinstance(merged, Polygon):
-        return Geometry(geom=merged), [merged]
+        return Geometry(geom=merged), [merged], healing
     if isinstance(merged, MultiPolygon):
         parts = list(merged.geoms)
-        return CompoundGeometry([Geometry(geom=p) for p in parts]), parts
+        return CompoundGeometry([Geometry(geom=p) for p in parts]), parts, healing
     raise ValueError("Unexpected geometry type after union: %s" % merged.geom_type)
 
 
+def union_all(polys, grid):
+    return unary_union(polys, grid_size=grid).buffer(0)
+
+
+def n_polygons(geom):
+    return len(geom.geoms) if isinstance(geom, MultiPolygon) else 1
+
+
+def snap_faces(polys, tol):
+    """Snap each face polygon to the union of the others, so edges/vertices of
+    neighbouring faces that nearly coincide (small gap or overlap from
+    modelling/tessellation) become identical and the union merges them.
+    Faces are snapped one after another to the already snapped others, so
+    both sides end up on the same vertices. Only vertices within tol of
+    another face move; a narrow slot inside one face is left alone (no
+    buffer-closing). Returns (snapped polygons, largest vertex movement)."""
+    polys = list(polys)
+    max_move = 0.0
+    for i in range(len(polys)):
+        others = unary_union(polys[:i] + polys[i + 1:])
+        s = snap(polys[i], others, tol)
+        if not s.is_valid:
+            s = s.buffer(0)
+        if s.is_empty:
+            continue  # keep the original rather than lose a face
+        if not s.equals_exact(polys[i], 0.0):
+            max_move = max(max_move, s.hausdorff_distance(polys[i]))
+        polys[i] = s
+    return polys, max_move
+
+
 def run_analysis(data):
-    geom, shapes = build_geometry(data)
+    geom, shapes, healing = build_geometry(data)
     n_parts = len(shapes)
 
     mesh_size = data.get("mesh_size", None)
@@ -129,6 +181,9 @@ def run_analysis(data):
         "warping_properties_computed": warping_ok,
         "warping_note": warping_note,
         "plastic_properties_computed": plastic_ok,
+        # repairs of small gaps: from the Alibre side (edges within a face)
+        # and from snapping neighbouring faces together here
+        "healing": healing,
     }
 
     if warping_ok:

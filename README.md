@@ -31,7 +31,8 @@ Alibre Script (IronPython) cannot load NumPy/`sectionproperties`, so:
   analysis and shows the results.
 - **`section_analysis.py`** (normal CPython with `sectionproperties`)
   computes the properties and writes `face_results.json`.
-- **`results_window.py`** is the WinForms results window (loaded with
+- **`results_window.py`** is the WinForms results window and
+  **`loop_utils.py`** chains edges into closed loops (both loaded with
   `execfile`, so edits take effect on the next run).
 
 ## Multiple faces
@@ -80,6 +81,13 @@ top of `alibre_section_properties.py`.
 If you edited the script while its tab was open in the Alibre editor, close
 the tab and reopen it. Run executes the editor's copy, not the file on disk.
 
+## Tests
+
+```
+.venv\Scripts\python.exe tests\test_loop_utils.py
+.venv\Scripts\python.exe tests\test_section_healing.py
+```
+
 ## Model units (important)
 
 AlibreScript and AlibreX ignore a document's **ModelUnits**. A part whose
@@ -104,5 +112,14 @@ For another unit, compare the script's area with Alibre's status bar
   points), the sweep is chosen by comparing with `Edge.Length`. An arc
   sweeping more than 180° on such a curve could pick the wrong side. This
   hasn't been seen in practice.
+- **Small gaps** in a face boundary (edges whose ends don't quite meet) are
+  closed with a straight segment, up to `GAP_TOL_REL` (default 2 % of the
+  face size); a larger gap stops the script with its size and location.
+  Selected faces that nearly touch (gap or overlap up to 0.5 % of the
+  section size, `SNAP_TOL_REL` in `section_analysis.py`) are snapped together
+  so they form one part. Both repairs are always listed in the results
+  window, `face_log.txt` and `face_results.json` (`healing`). A narrow slot
+  inside one face is not affected; two separate faces closer than the snap
+  tolerance are merged.
 - `MESH_SIZE = None` sets the maximum element area to area/3000. Use a
   smaller value for thin-walled sections.

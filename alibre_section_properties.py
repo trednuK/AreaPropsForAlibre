@@ -27,7 +27,7 @@ from System.IO import Path
 # ---------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------
-# Folder holding this script, section_analysis.py and results_window.py.
+# Folder holding this script, section_analysis.py, results_window.py and loop_utils.py.
 # None -> found automatically under Documents\Alibre Script Library (Alibre
 # Script runs scripts from a string, so the script can't see its own path).
 SCRIPT_DIR = None
@@ -38,7 +38,8 @@ PYTHON_EXE = None
 def find_script_dir():
     def ok(d):
         return d and os.path.isfile(os.path.join(d, "section_analysis.py")) \
-            and os.path.isfile(os.path.join(d, "results_window.py"))
+            and os.path.isfile(os.path.join(d, "results_window.py")) \
+            and os.path.isfile(os.path.join(d, "loop_utils.py"))
     if ok(SCRIPT_DIR):
         return SCRIPT_DIR
     try:
@@ -62,6 +63,7 @@ if not PYTHON_EXE:
     PYTHON_EXE = os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe")
 ANALYSIS_SCRIPT = os.path.join(BASE_DIR, "section_analysis.py")
 WINDOW_SCRIPT = os.path.join(BASE_DIR, "results_window.py")
+LOOP_SCRIPT = os.path.join(BASE_DIR, "loop_utils.py")
 WORK_DIR = os.path.join(BASE_DIR, "work")
 GEOMETRY_PATH = os.path.join(WORK_DIR, "face_geometry.json")
 RESULTS_PATH = os.path.join(WORK_DIR, "face_results.json")
@@ -74,6 +76,10 @@ VIEW_FROM_BEHIND = False    # True: mirror the 2D axes (view the face from the b
 COPLANAR_TOL = 0.01         # output units; max plane offset between selected faces
 MESH_SIZE = None            # None -> section_analysis.py picks a size (max element area)
 SEGMENTS_PER_CIRCLE = 96    # sampling density for curved edges
+# Gaps between edge ends (edges that don't quite connect) up to this fraction
+# of the face's bounding-box size are closed with a straight segment and
+# reported. None -> default from loop_utils.py (0.02 = 2 %).
+GAP_TOL_REL = None
 # Extra length factor per document ModelUnits. AlibreScript/AlibreX ignore a
 # document's model units: a part whose ModelUnits are meters (e.g. a STEP
 # imported in m) comes back 100x too small. Verified: meters -> 100 (status
@@ -205,51 +211,6 @@ def edge_polyline(ad_edge, script_length, scale):
     return candidates[0][1], ctype
 
 
-def chain_loop(polylines, tol):
-    """Order/orient the edge polylines of one loop into a closed point list."""
-    if len(polylines) == 1:
-        pts = list(polylines[0])
-        if dist(pts[0], pts[-1]) < tol:
-            pts = pts[:-1]
-        return pts
-    remaining = list(polylines)
-    first = remaining.pop(0)
-    # Orient the first edge so its end connects to one of the others.
-    def min_end_dist(p):
-        return min(min(dist(p, q[0]), dist(p, q[-1])) for q in remaining)
-    if min_end_dist(first[0]) < min_end_dist(first[-1]):
-        first = list(reversed(first))
-    chain = list(first)
-    while remaining:
-        end = chain[-1]
-        best_i, best_rev, best_d = None, False, None
-        for i, q in enumerate(remaining):
-            for rev, p in ((False, q[0]), (True, q[-1])):
-                d = dist(end, p)
-                if best_d is None or d < best_d:
-                    best_i, best_rev, best_d = i, rev, d
-        if best_d > tol:
-            fail("Could not chain the face's edges into a closed loop "
-                 "(gap of %.6g). Is the face valid?" % best_d)
-        q = remaining.pop(best_i)
-        if best_rev:
-            q = list(reversed(q))
-        chain.extend(q[1:])
-    if dist(chain[0], chain[-1]) < tol:
-        chain = chain[:-1]
-    return chain
-
-
-def shoelace_area(points):
-    a = 0.0
-    n = len(points)
-    for i in range(n):
-        x1, y1 = points[i]
-        x2, y2 = points[(i + 1) % n]
-        a += x1 * y2 - x2 * y1
-    return a / 2.0
-
-
 def axis_name(vec):
     """'X', '-X', ... for a global axis direction, else a short description."""
     for i, name in enumerate("XYZ"):
@@ -278,9 +239,18 @@ def plane_axes(n_out):
 # Alibre integration
 # ---------------------------------------------------------------------
 if SCRIPT_DIR is None:
-    fail("Could not find the AreaProps script folder (with section_analysis.py and "
-         "results_window.py) under Documents\\Alibre Script Library. Set SCRIPT_DIR "
+    fail("Could not find the AreaProps script folder (with section_analysis.py, "
+         "results_window.py and loop_utils.py) under Documents\\Alibre Script Library. Set SCRIPT_DIR "
          "at the top of alibre_section_properties.py.")
+
+# Pure geometry helpers (chain_loop, shoelace_area, ...), shared with the tests.
+_loop_ns = {}
+execfile(LOOP_SCRIPT, _loop_ns)
+chain_loop = _loop_ns["chain_loop"]
+shoelace_area = _loop_ns["shoelace_area"]
+bbox_size = _loop_ns["bbox_size"]
+LoopGapError = _loop_ns["LoopGapError"]
+gap_tol_rel = GAP_TOL_REL if GAP_TOL_REL is not None else _loop_ns["GAP_TOL_REL"]
 
 part = CurrentPart()
 if part is None:
@@ -298,7 +268,7 @@ def face_loops_3d(face, scale, out_scale, U):
     script_len_by_key = {}
     for e in face.GetEdges():
         script_len_by_key[tuple(e._Edge.Key)] = e.Length
-    loops = []
+    loop_polylines = []
     for loop in com_items(face._Face.Loops):
         polylines = []
         for coedge in com_items(loop.Coedges):
@@ -308,10 +278,32 @@ def face_loops_3d(face, scale, out_scale, U):
             log("  edge %s: %d pts, sampled len %.6g %s"
                 % (ctype, len(pts), polyline_length(pts) * out_scale, U))
             polylines.append(pts)
-        loops.append(chain_loop(polylines, 1e-4))  # AlibreX units
-    if not loops:
+        loop_polylines.append(polylines)
+    if not loop_polylines:
         fail("No boundary loops found on %s." % face.Name)
-    return loops
+    # Edge ends closer than 1e-4 AlibreX units are connected; larger gaps up
+    # to GAP_TOL_REL x the face size are bridged with a straight segment.
+    size = bbox_size([pl for pls in loop_polylines for pl in pls])
+    max_gap = gap_tol_rel * size
+    loops, gaps = [], []
+    for polylines in loop_polylines:
+        try:
+            pts, loop_gaps = chain_loop(polylines, 1e-4, max_gap)  # AlibreX units
+        except LoopGapError as exc:
+            at = tuple(c * out_scale for c in exc.at)
+            fail("The edges of %s do not form a closed boundary: there is a gap of "
+                 "%.4g %s near (%.6g; %.6g; %.6g) %s (global). Gaps up to %.4g %s "
+                 "(GAP_TOL_REL = %.3g of the face size) are closed automatically. "
+                 "Repair the face in Alibre."
+                 % (face.Name, exc.gap * out_scale, U, at[0], at[1], at[2], U,
+                    max_gap * out_scale, U, gap_tol_rel))
+        loops.append(pts)
+        for g, mid in loop_gaps:
+            at = tuple(c * out_scale for c in mid)
+            log("  gap closed: %.6g %s near (%.6g; %.6g; %.6g) %s (global)"
+                % (g * out_scale, U, at[0], at[1], at[2], U))
+            gaps.append((g * out_scale, mid))
+    return loops, gaps
 
 
 try:
@@ -384,10 +376,16 @@ try:
     plane_offset = plane_d * out_scale
 
     regions = []
+    gaps_closed = []   # bridged gaps between edge ends, in output units
     for f in faces:
         log("%s:" % f.Name)
+        loops_3d, face_gaps = face_loops_3d(f, scale, out_scale, U)
         loops_2d = [[(vec_dot(p, u_axis) * out_scale, vec_dot(p, v_axis) * out_scale) for p in lp]
-                    for lp in face_loops_3d(f, scale, out_scale, U)]
+                    for lp in loops_3d]
+        for g, mid in face_gaps:
+            gaps_closed.append({"face": f.Name, "length": g,
+                                "at": [vec_dot(mid, u_axis) * out_scale,
+                                       vec_dot(mid, v_axis) * out_scale]})
         areas = [abs(shoelace_area(lp)) for lp in loops_2d]
         outer_idx = areas.index(max(areas))
         regions.append({"outer": loops_2d[outer_idx],
@@ -398,6 +396,7 @@ try:
         os.makedirs(WORK_DIR)
     with open(GEOMETRY_PATH, "w") as f:
         json.dump({"units": U, "mesh_size": MESH_SIZE, "regions": regions,
+                   "gaps_closed": gaps_closed,
                    "axis_names": [u_name, v_name], "plot_paths": PLOT_PATHS}, f)
 
     # ----------------------- run the external analysis -----------------------
@@ -480,6 +479,31 @@ try:
     if len(faces) > 1:
         notes.append(T(u"%d vlakken samengevoegd tot %d los(se) deel/delen." % (len(faces), n_parts),
                        u"%d faces merged into %d separate part(s)." % (len(faces), n_parts)))
+
+    # Repairs are always reported, never silent.
+    def num(v, lang):
+        s = u"%.3g" % v
+        return s.replace(u".", u",") if lang == "nl" else s
+
+    if gaps_closed:
+        n_gaps = len(gaps_closed)
+        g_max = max(g["length"] for g in gaps_closed)
+        notes.append(T(u"%d kleine opening(en) in de rand gesloten (grootste %s %s)."
+                       % (n_gaps, num(g_max, "nl"), U),
+                       u"%d small gap(s) in the boundary closed (largest %s %s)."
+                       % (n_gaps, num(g_max, "en"), U)))
+    healing = r.get("healing") or {}
+    if healing.get("snapped_faces"):
+        s_max = healing.get("max_snap", 0.0)
+        before, after = healing.get("parts_before_snap"), healing.get("parts_after_snap")
+        if before is not None and after is not None and before != after:
+            extra = (u" (%d -> %d delen)" % (before, after), u" (%d -> %d parts)" % (before, after))
+        else:
+            extra = (u"", u"")
+        notes.append(T(u"Vlakken samengevoegd over een opening van max. %s %s%s."
+                       % (num(s_max, "nl"), U, extra[0]),
+                       u"Faces merged across a gap of at most %s %s%s."
+                       % (num(s_max, "en"), U, extra[1])))
     notes.append(T(u"Assen: x = globaal %s, y = globaal %s (gezien van buiten op het vlak)" % (u_name, v_name),
                    u"Axes: x = global %s, y = global %s (face seen from outside)" % (u_name, v_name)))
     notes.append(T(u"Volledige resultaten: %s" % RESULTS_PATH, u"Full results: %s" % RESULTS_PATH))
