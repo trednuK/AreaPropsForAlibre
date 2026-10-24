@@ -9,7 +9,8 @@ Select exactly one planar face in the 3D view, then run this script. It:
      curve (lines, arcs, full circles, ellipses, splines) into 2D points.
   2. Writes that geometry to a JSON file.
   3. Launches an external CPython process running section_analysis.py
-     (uses `sectionproperties`) and shows the results in a dialog.
+     (uses `sectionproperties`) and shows the results in a dialog. The
+     dialog's Recalculate button reruns step 3 with another mesh accuracy.
 
 See README.md for the one-time setup of the external Python environment.
 """
@@ -69,12 +70,16 @@ GEOMETRY_PATH = os.path.join(WORK_DIR, "face_geometry.json")
 RESULTS_PATH = os.path.join(WORK_DIR, "face_results.json")
 PLOT_PATHS = {"nl": os.path.join(WORK_DIR, "face_plot_nl.png"),
               "en": os.path.join(WORK_DIR, "face_plot_en.png")}
-LANG_PATH = os.path.join(WORK_DIR, "window_lang.txt")   # last NL/EN choice
+LANG_PATH = os.path.join(WORK_DIR, "window_lang.txt")   # old NL/EN file, still read
+SETTINGS_PATH = os.path.join(WORK_DIR, "window_settings.json")  # language + accuracy choice
 LOG_PATH = os.path.join(WORK_DIR, "face_log.txt")
 
 VIEW_FROM_BEHIND = False    # True: mirror the 2D axes (view the face from the back)
 COPLANAR_TOL = 0.01         # output units; max plane offset between selected faces
-MESH_SIZE = None            # None -> section_analysis.py picks a size (max element area)
+MESH_SIZE = None            # max element area; None -> area / target element count, with
+                            # the target from the accuracy dropdown in the results window
+                            # (remembered in work\window_settings.json). A number overrides it.
+DEFAULT_N_TARGET = 3000     # target element count when nothing was chosen yet ("Normal")
 SEGMENTS_PER_CIRCLE = 96    # sampling density for curved edges
 # Gaps between edge ends (edges that don't quite connect) up to this fraction
 # of the face's bounding-box size are closed with a straight segment and
@@ -110,6 +115,57 @@ def fail(message):
     write_log()
     win.ErrorDialog(message, "Section Properties")
     raise SystemExit
+
+
+# ---------------------------------------------------------------------
+# External analysis (first run and Recalculate in the results window)
+# ---------------------------------------------------------------------
+class AnalysisError(Exception):
+    pass
+
+
+def saved_n_target():
+    """Target element count chosen in the results window (accuracy dropdown)."""
+    try:
+        with open(SETTINGS_PATH) as f:
+            n = json.load(f).get("n_target")
+        if isinstance(n, int) and n > 0:
+            return n
+    except Exception:
+        pass
+    return DEFAULT_N_TARGET
+
+
+def run_external_analysis(n_target):
+    """Run section_analysis.py on the saved face_geometry.json with the given
+    target element count and return the results dict. Raises AnalysisError;
+    shows no dialogs, so it can run on the results window's background thread."""
+    with open(GEOMETRY_PATH, "r") as f:
+        geometry = json.load(f)
+    geometry["n_target"] = n_target
+    with open(GEOMETRY_PATH, "w") as f:
+        json.dump(geometry, f)
+    for old in [RESULTS_PATH] + list(PLOT_PATHS.values()):
+        if os.path.isfile(old):
+            os.remove(old)
+
+    psi = ProcessStartInfo(PYTHON_EXE, '"%s" "%s" "%s"' % (ANALYSIS_SCRIPT, GEOMETRY_PATH, RESULTS_PATH))
+    psi.UseShellExecute = False
+    psi.CreateNoWindow = True
+    psi.RedirectStandardError = True
+    proc = Process.Start(psi)
+    stderr = proc.StandardError.ReadToEnd()
+    proc.WaitForExit()
+
+    if not os.path.isfile(RESULTS_PATH):
+        raise AnalysisError("The external analysis did not produce a results file.\nstderr:\n%s"
+                            % stderr[-2000:])
+    with open(RESULTS_PATH, "r") as f:
+        results = json.load(f)
+    if not results.get("success", False):
+        raise AnalysisError("sectionproperties analysis failed:\n%s"
+                            % results.get("error", "unknown error"))
+    return results
 
 
 # ---------------------------------------------------------------------
@@ -394,8 +450,9 @@ try:
 
     if not os.path.isdir(WORK_DIR):
         os.makedirs(WORK_DIR)
+    n_target = saved_n_target()
     with open(GEOMETRY_PATH, "w") as f:
-        json.dump({"units": U, "mesh_size": MESH_SIZE, "regions": regions,
+        json.dump({"units": U, "mesh_size": MESH_SIZE, "n_target": n_target, "regions": regions,
                    "gaps_closed": gaps_closed,
                    "axis_names": [u_name, v_name], "plot_paths": PLOT_PATHS}, f)
 
@@ -404,109 +461,113 @@ try:
         fail("Python environment not found:\n%s\nCreate it with the two commands in README (Setup)." % PYTHON_EXE)
     if not os.path.isfile(ANALYSIS_SCRIPT):
         fail("Configured ANALYSIS_SCRIPT not found:\n%s\nSee README." % ANALYSIS_SCRIPT)
-    for old in [RESULTS_PATH] + list(PLOT_PATHS.values()):
-        if os.path.isfile(old):
-            os.remove(old)
-
-    psi = ProcessStartInfo(PYTHON_EXE, '"%s" "%s" "%s"' % (ANALYSIS_SCRIPT, GEOMETRY_PATH, RESULTS_PATH))
-    psi.UseShellExecute = False
-    psi.CreateNoWindow = True
-    psi.RedirectStandardError = True
-    proc = Process.Start(psi)
-    stderr = proc.StandardError.ReadToEnd()
-    proc.WaitForExit()
-
-    if not os.path.isfile(RESULTS_PATH):
-        fail("The external analysis did not produce a results file.\nstderr:\n%s" % stderr[-2000:])
-    with open(RESULTS_PATH, "r") as f:
-        results = json.load(f)
-    if not results.get("success", False):
-        fail("sectionproperties analysis failed:\n%s" % results.get("error", "unknown error"))
+    log("Mesh target: %s elements%s" % (n_target, " (MESH_SIZE = %s wins)" % MESH_SIZE if MESH_SIZE else ""))
+    try:
+        results = run_external_analysis(n_target)
+    except AnalysisError as exc:
+        fail(str(exc))
 
     # ------------------------------ show results ------------------------------
     # Texts as {"nl": ..., "en": ...}; the results window switches language live.
     def T(nl, en):
         return {"nl": nl, "en": en}
 
-    r = results
-    u1, u2, u3, u4, u6 = U, U + u"²", U + u"³", U + u"⁴", U + u"⁶"
-    cx, cy = r["centroid"]
-    c3 = tuple(cx * u_axis[i] + cy * v_axis[i] + plane_offset * normal[i] for i in range(3))
-    sections = [
-        (T(u"Geometrie", u"Geometry"), [
-            (T(u"Oppervlakte A", u"Area A"), r["area"], u2),
-            (T(u"Omtrek (buitenrand)", u"Perimeter (outer)"), r["perimeter"], u1),
-            (T(u"Zwaartepunt (x; y)", u"Centroid (x; y)"), (cx, cy), u1),
-            (T(u"Zwaartepunt globaal (X; Y; Z)", u"Centroid global (X; Y; Z)"), c3, u1),
-        ]),
-        (T(u"Traagheid t.o.v. zwaartepunt", u"Second moments about centroid"), [
-            (u"Ixx", r["ixx_c"], u4),
-            (u"Iyy", r["iyy_c"], u4),
-            (u"Ixy", r["ixy_c"], u4),
-            (T(u"I11 (hoofdas)", u"I11 (principal)"), r["i11_c"], u4),
-            (T(u"I22 (hoofdas)", u"I22 (principal)"), r["i22_c"], u4),
-            (T(u"Hoek hoofdas φ", u"Principal angle φ"), r["principal_angle_deg"], u"°"),
-            (T(u"Traagheidsstraal rx", u"Radius of gyration rx"), r["rc"][0], u1),
-            (T(u"Traagheidsstraal ry", u"Radius of gyration ry"), r["rc"][1], u1),
-        ]),
-        (T(u"Weerstandsmomenten", u"Section moduli"), [
-            (T(u"Wx boven (+y)", u"Wx top (+y)"), r["zxx_plus"], u3),
-            (T(u"Wx onder (−y)", u"Wx bottom (−y)"), r["zxx_minus"], u3),
-            (T(u"Wy rechts (+x)", u"Wy right (+x)"), r["zyy_plus"], u3),
-            (T(u"Wy links (−x)", u"Wy left (−x)"), r["zyy_minus"], u3),
-        ]),
-    ]
-    if r.get("plastic_properties_computed"):
-        sections[2][1].extend([
-            (T(u"Wpl,x (plastisch)", u"Wpl,x (plastic)"), r["sxx"], u3),
-            (T(u"Wpl,y (plastisch)", u"Wpl,y (plastic)"), r["syy"], u3),
-        ])
-    notes = []
-    n_parts = r.get("n_parts", 1)
-    if r.get("warping_properties_computed"):
-        sections.append((T(u"Torsie en welving", u"Torsion and warping"), [
-            (T(u"Torsieconstante J", u"Torsion constant J"), r["j"], u4),
-            (T(u"Welvingsconstante Iw", u"Warping constant Iw"), r["gamma"], u6),
-            (T(u"Dwarskrachtcentrum (x; y)", u"Shear centre (x; y)"), tuple(r["shear_centre"]), u1),
-        ]))
-    elif n_parts > 1:
-        notes.append(T(u"Torsie/welving niet berekend: doorsnede bestaat uit %d losse delen." % n_parts,
-                       u"Torsion/warping not computed: section consists of %d separate parts." % n_parts))
-    else:
-        reason = r.get("warping_note") or u"?"
-        notes.append(T(u"Torsie/welving niet berekend: %s" % reason,
-                       u"Torsion/warping not computed: %s" % reason))
-    if len(faces) > 1:
-        notes.append(T(u"%d vlakken samengevoegd tot %d los(se) deel/delen." % (len(faces), n_parts),
-                       u"%d faces merged into %d separate part(s)." % (len(faces), n_parts)))
-
-    # Repairs are always reported, never silent.
     def num(v, lang):
         s = u"%.3g" % v
         return s.replace(u".", u",") if lang == "nl" else s
 
-    if gaps_closed:
-        n_gaps = len(gaps_closed)
-        g_max = max(g["length"] for g in gaps_closed)
-        notes.append(T(u"%d kleine opening(en) in de rand gesloten (grootste %s %s)."
-                       % (n_gaps, num(g_max, "nl"), U),
-                       u"%d small gap(s) in the boundary closed (largest %s %s)."
-                       % (n_gaps, num(g_max, "en"), U)))
-    healing = r.get("healing") or {}
-    if healing.get("snapped_faces"):
-        s_max = healing.get("max_snap", 0.0)
-        before, after = healing.get("parts_before_snap"), healing.get("parts_after_snap")
-        if before is not None and after is not None and before != after:
-            extra = (u" (%d -> %d delen)" % (before, after), u" (%d -> %d parts)" % (before, after))
+    def build_display(r):
+        """(subtitle, sections, notes, plots) for the results window from one
+        results dict; used for the first run and for Recalculate."""
+        u1, u2, u3, u4, u6 = U, U + u"²", U + u"³", U + u"⁴", U + u"⁶"
+        cx, cy = r["centroid"]
+        c3 = tuple(cx * u_axis[i] + cy * v_axis[i] + plane_offset * normal[i] for i in range(3))
+        sections = [
+            (T(u"Geometrie", u"Geometry"), [
+                (T(u"Oppervlakte A", u"Area A"), r["area"], u2),
+                (T(u"Omtrek (buitenrand)", u"Perimeter (outer)"), r["perimeter"], u1),
+                (T(u"Zwaartepunt (x; y)", u"Centroid (x; y)"), (cx, cy), u1),
+                (T(u"Zwaartepunt globaal (X; Y; Z)", u"Centroid global (X; Y; Z)"), c3, u1),
+            ]),
+            (T(u"Traagheid t.o.v. zwaartepunt", u"Second moments about centroid"), [
+                (u"Ixx", r["ixx_c"], u4),
+                (u"Iyy", r["iyy_c"], u4),
+                (u"Ixy", r["ixy_c"], u4),
+                (T(u"I11 (hoofdas)", u"I11 (principal)"), r["i11_c"], u4),
+                (T(u"I22 (hoofdas)", u"I22 (principal)"), r["i22_c"], u4),
+                (T(u"Hoek hoofdas φ", u"Principal angle φ"), r["principal_angle_deg"], u"°"),
+                (T(u"Traagheidsstraal rx", u"Radius of gyration rx"), r["rc"][0], u1),
+                (T(u"Traagheidsstraal ry", u"Radius of gyration ry"), r["rc"][1], u1),
+            ]),
+            (T(u"Weerstandsmomenten", u"Section moduli"), [
+                (T(u"Wx boven (+y)", u"Wx top (+y)"), r["zxx_plus"], u3),
+                (T(u"Wx onder (−y)", u"Wx bottom (−y)"), r["zxx_minus"], u3),
+                (T(u"Wy rechts (+x)", u"Wy right (+x)"), r["zyy_plus"], u3),
+                (T(u"Wy links (−x)", u"Wy left (−x)"), r["zyy_minus"], u3),
+            ]),
+        ]
+        if r.get("plastic_properties_computed"):
+            sections[2][1].extend([
+                (T(u"Wpl,x (plastisch)", u"Wpl,x (plastic)"), r["sxx"], u3),
+                (T(u"Wpl,y (plastisch)", u"Wpl,y (plastic)"), r["syy"], u3),
+            ])
+        notes = []
+        n_parts = r.get("n_parts", 1)
+        if r.get("warping_properties_computed"):
+            sections.append((T(u"Torsie en welving", u"Torsion and warping"), [
+                (T(u"Torsieconstante J", u"Torsion constant J"), r["j"], u4),
+                (T(u"Welvingsconstante Iw", u"Warping constant Iw"), r["gamma"], u6),
+                (T(u"Dwarskrachtcentrum (x; y)", u"Shear centre (x; y)"), tuple(r["shear_centre"]), u1),
+            ]))
+        elif n_parts > 1:
+            notes.append(T(u"Torsie/welving niet berekend: doorsnede bestaat uit %d losse delen." % n_parts,
+                           u"Torsion/warping not computed: section consists of %d separate parts." % n_parts))
         else:
-            extra = (u"", u"")
-        notes.append(T(u"Vlakken samengevoegd over een opening van max. %s %s%s."
-                       % (num(s_max, "nl"), U, extra[0]),
-                       u"Faces merged across a gap of at most %s %s%s."
-                       % (num(s_max, "en"), U, extra[1])))
-    notes.append(T(u"Assen: x = globaal %s, y = globaal %s (gezien van buiten op het vlak)" % (u_name, v_name),
-                   u"Axes: x = global %s, y = global %s (face seen from outside)" % (u_name, v_name)))
-    notes.append(T(u"Volledige resultaten: %s" % RESULTS_PATH, u"Full results: %s" % RESULTS_PATH))
+            reason = r.get("warping_note") or u"?"
+            notes.append(T(u"Torsie/welving niet berekend: %s" % reason,
+                           u"Torsion/warping not computed: %s" % reason))
+        if len(faces) > 1:
+            notes.append(T(u"%d vlakken samengevoegd tot %d los(se) deel/delen." % (len(faces), n_parts),
+                           u"%d faces merged into %d separate part(s)." % (len(faces), n_parts)))
+
+        # Repairs are always reported, never silent.
+        if gaps_closed:
+            n_gaps = len(gaps_closed)
+            g_max = max(g["length"] for g in gaps_closed)
+            notes.append(T(u"%d kleine opening(en) in de rand gesloten (grootste %s %s)."
+                           % (n_gaps, num(g_max, "nl"), U),
+                           u"%d small gap(s) in the boundary closed (largest %s %s)."
+                           % (n_gaps, num(g_max, "en"), U)))
+        healing = r.get("healing") or {}
+        if healing.get("snapped_faces"):
+            s_max = healing.get("max_snap", 0.0)
+            before, after = healing.get("parts_before_snap"), healing.get("parts_after_snap")
+            if before is not None and after is not None and before != after:
+                extra = (u" (%d -> %d delen)" % (before, after), u" (%d -> %d parts)" % (before, after))
+            else:
+                extra = (u"", u"")
+            notes.append(T(u"Vlakken samengevoegd over een opening van max. %s %s%s."
+                           % (num(s_max, "nl"), U, extra[0]),
+                           u"Faces merged across a gap of at most %s %s%s."
+                           % (num(s_max, "en"), U, extra[1])))
+        n_el = r.get("n_elements")
+        if n_el is not None:
+            if r.get("n_target"):
+                notes.append(T(u"Mesh: %d elementen (doel ~%d)" % (n_el, r["n_target"]),
+                               u"Mesh: %d elements (target ~%d)" % (n_el, r["n_target"])))
+            else:
+                notes.append(T(u"Mesh: %d elementen (MESH_SIZE = %s, keuze nauwkeurigheid niet gebruikt)"
+                               % (n_el, MESH_SIZE),
+                               u"Mesh: %d elements (MESH_SIZE = %s, accuracy choice not used)"
+                               % (n_el, MESH_SIZE)))
+        notes.append(T(u"Assen: x = globaal %s, y = globaal %s (gezien van buiten op het vlak)" % (u_name, v_name),
+                       u"Axes: x = global %s, y = global %s (face seen from outside)" % (u_name, v_name)))
+        notes.append(T(u"Volledige resultaten: %s" % RESULTS_PATH, u"Full results: %s" % RESULTS_PATH))
+        plots = dict((k, p) for k, p in PLOT_PATHS.items() if os.path.isfile(p)) or None
+        if plots is None and r.get("plot_error"):
+            notes.append(T(u"Plot niet gemaakt: %s" % r["plot_error"],
+                           u"Plot not created: %s" % r["plot_error"]))
+        return subtitle, sections, notes, plots
 
     if len(face_names) <= 4:
         faces_txt = T(u", ".join(face_names), u", ".join(face_names))
@@ -518,28 +579,50 @@ try:
     def nl(t):
         return t["nl"] if isinstance(t, dict) else t
 
-    text_lines = []
-    for title, rows in sections:
-        text_lines.append(nl(title))
-        for label, value, unit in rows:
-            if isinstance(value, tuple):
-                value = u"(" + u"; ".join("%.6g" % v for v in value) + u")"
-            else:
-                value = "%.6g" % value
-            text_lines.append(u"  %s = %s %s" % (nl(label), value, unit))
-    note_lines = [nl(n) for n in notes]
+    def display_text(sections, notes):
+        """Plain (Dutch) text of the results, for the log and the fallback dialog."""
+        text_lines = []
+        for title, rows in sections:
+            text_lines.append(nl(title))
+            for label, value, unit in rows:
+                if isinstance(value, tuple):
+                    value = u"(" + u"; ".join("%.6g" % v for v in value) + u")"
+                else:
+                    value = "%.6g" % value
+                text_lines.append(u"  %s = %s %s" % (nl(label), value, unit))
+        return text_lines, [nl(n) for n in notes]
+
+    subtitle, sections, notes, plots = build_display(results)
+    text_lines, note_lines = display_text(sections, notes)
     log(nl(subtitle))
     log(u"\n".join(text_lines + note_lines))
     write_log()
 
+    def recalc(n):
+        """Recalculate from the results window (background thread): rerun
+        section_analysis.py on the saved face_geometry.json with mesh target n.
+        Raises AnalysisError (shown in the window) instead of calling fail()."""
+        log(u"")
+        log(u"Recalculate: mesh target %s elements" % n)
+        try:
+            r = run_external_analysis(n)
+            subtitle_r, sections_r, notes_r, plots_r = build_display(r)
+            tl, nlines = display_text(sections_r, notes_r)
+            log(u"\n".join(tl + nlines))
+        except Exception as exc:
+            log(u"Recalculate failed: %s" % exc)
+            write_log()
+            raise
+        write_log()
+        return {"subtitle": subtitle_r, "sections": sections_r, "notes": notes_r,
+                "image_path": plots_r, "n_target": r.get("n_target")}
+
     try:
         ns = {}
         execfile(WINDOW_SCRIPT, ns)
-        plots = dict((k, p) for k, p in PLOT_PATHS.items() if os.path.isfile(p)) or None
-        if plots is None and r.get("plot_error"):
-            notes.append(T(u"Plot niet gemaakt: %s" % r["plot_error"],
-                           u"Plot not created: %s" % r["plot_error"]))
-        ns["show_results"](None, subtitle, sections, notes, image_path=plots, lang_path=LANG_PATH)
+        ns["show_results"](None, subtitle, sections, notes, image_path=plots, lang_path=LANG_PATH,
+                           settings_path=SETTINGS_PATH, n_target=results.get("n_target"),
+                           recalc=recalc)
     except SystemExit:
         raise
     except Exception as exc:

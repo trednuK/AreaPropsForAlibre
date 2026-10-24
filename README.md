@@ -11,8 +11,18 @@ matplotlib, saved as `work\face_plot_nl.png` / `face_plot_en.png`): centroid,
 centroidal x/y axes in global coordinates, principal axes 1 and 2 with the
 angle phi from +x, and the shear centre.
 NL/EN radio buttons in the window header switch all window text, including
-the plot, between Dutch and English instantly; the choice is remembered in
-`work/window_lang.txt`. Copy always uses the Windows decimal separator.
+the plot, between Dutch and English instantly. Copy always uses the Windows
+decimal separator.
+
+Under the header, **Accuracy (mesh)** sets how fine the mesh of the
+calculation is: Coarse (~1000 elements), Normal (~3000, default), Fine
+(~10000) or Very fine (~30000). **Recalculate** reruns the analysis on the
+saved geometry with that choice and updates the table, notes and plot in
+place (no need to reselect faces; the window shows "Calculating..." and stays
+usable, an error is shown in the window). The note under the table gives
+the number of mesh elements used. Language and accuracy are remembered in
+`work/window_settings.json` and used for the next run; the same presets
+are used in the Mecway section-properties tool.
 
 [![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/trednuk/areapropsforalibre?utm_source=readme&utm_medium=badge)
 
@@ -86,7 +96,12 @@ the tab and reopen it. Run executes the editor's copy, not the file on disk.
 ```
 .venv\Scripts\python.exe tests\test_loop_utils.py
 .venv\Scripts\python.exe tests\test_section_healing.py
+.venv\Scripts\python.exe tests\test_mesh_target.py
 ```
+
+`tests\test_results_window_ipy.py` tests the results window (dropdown,
+Recalculate, language switch) offscreen; it needs an IronPython 2.7
+(`ipy tests\test_results_window_ipy.py [png_dir]`).
 
 ## Model units (important)
 
@@ -121,5 +136,9 @@ For another unit, compare the script's area with Alibre's status bar
   window, `face_log.txt` and `face_results.json` (`healing`). A narrow slot
   inside one face is not affected; two separate faces closer than the snap
   tolerance are merged.
-- `MESH_SIZE = None` sets the maximum element area to area/3000. Use a
-  smaller value for thin-walled sections.
+- The mesh's maximum element area is area / target element count (the
+  Accuracy choice; elements can't be larger, so the actual count is
+  somewhat higher). For thin-walled sections choose Fine or Very fine; the
+  torsion/warping values (J, Iw, shear centre) depend most on it. Setting
+  `MESH_SIZE` (maximum element area) at the top of
+  `alibre_section_properties.py` overrides the choice.

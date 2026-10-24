@@ -11,7 +11,8 @@ Usage:
 Input JSON schema (written by the Alibre-side script):
 {
     "units": "mm",
-    "mesh_size": null,
+    "mesh_size": null,                # max element area; null -> area / n_target
+    "n_target": 3000,                 # optional, target element count (default 3000)
     "regions": [                      # one per selected face
         {"outer": [[x, y], ...], "holes": [[[x, y], ...], ...]},
         ...
@@ -20,6 +21,8 @@ Input JSON schema (written by the Alibre-side script):
 Optional "gaps_closed": [{"face", "length", "at": [x, y]}, ...] lists gaps
 between edge ends the Alibre side bridged; it is passed on as
 results["healing"]["gaps_closed"].
+The results contain "n_elements" (mesh elements used), "n_target" (None
+when an explicit mesh_size was given) and "mesh_size".
 The older single-face form {"outer": ..., "holes": ...} is also accepted.
 Regions are unioned: faces that touch merge into one section, separate
 faces form a compound section. Faces that nearly touch (gap/overlap up to
@@ -39,6 +42,8 @@ from sectionproperties.analysis import Section
 # Neighbouring faces whose edges are closer than this fraction of the overall
 # section size are snapped together before the union (see snap_faces).
 SNAP_TOL_REL = 0.005
+# Target number of mesh elements when the input gives no "n_target"/"mesh_size".
+DEFAULT_N_TARGET = 3000
 
 
 def region_polygon(region):
@@ -125,10 +130,12 @@ def run_analysis(data):
     geom, shapes, healing = build_geometry(data)
     n_parts = len(shapes)
 
+    # mesh_sizes is a maximum element AREA. An explicit "mesh_size" wins;
+    # otherwise area / n_target (the accuracy choice in the results window).
+    n_target = data.get("n_target") or DEFAULT_N_TARGET
     mesh_size = data.get("mesh_size", None)
     if not mesh_size:
-        # mesh_sizes is a maximum element AREA: aim for ~3000 elements
-        mesh_size = geom.calculate_area() / 3000.0
+        mesh_size = geom.calculate_area() / float(n_target)
 
     geom.create_mesh(mesh_sizes=mesh_size)
     sec = Section(geometry=geom)
@@ -178,6 +185,9 @@ def run_analysis(data):
         "zyy_minus": zyy_minus,
         "rc": list(sec.get_rc()),
         "n_parts": n_parts,
+        "n_elements": len(sec.elements),
+        "n_target": None if data.get("mesh_size") else n_target,
+        "mesh_size": mesh_size,
         "warping_properties_computed": warping_ok,
         "warping_note": warping_note,
         "plastic_properties_computed": plastic_ok,
